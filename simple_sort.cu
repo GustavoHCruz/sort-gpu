@@ -187,19 +187,8 @@ int main(int argc, char *argv[])
   uint max_size_aux = max(potency, 1024U);
 
   uint *d_input, *h_input = (uint *)malloc(input_size), *d_output, *h_output = (uint *)malloc(input_size), smallest, biggest, *d_global_histogram, *d_line_histogram, *d_global_histogram_scan, *h_global_histogram_scan = (uint *)malloc(histogram_size), *d_vertical_scan, *h_aux = (uint *)malloc(max_size_aux * sizeof(uint)), *d_aux;
-  cudaMalloc(&d_input, input_size);
-  cudaMalloc(&d_output, input_size);
-
-  cudaMalloc(&d_global_histogram, histogram_size);
-  cudaMemset(d_global_histogram, 0, histogram_size);
-  cudaMalloc(&d_global_histogram_scan, histogram_size);
 
   uint blocks_per_grid = (n_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-
-  cudaMalloc(&d_line_histogram, blocks_per_grid * histogram_size);
-  cudaMemset(d_line_histogram, 0, blocks_per_grid * histogram_size);
-  cudaMalloc(&d_vertical_scan, blocks_per_grid * histogram_size);
-  cudaMalloc(&d_aux, max_size_aux * sizeof(uint));
 
   initialize_input_vector(h_input, n_elements, &smallest, &biggest);
 
@@ -210,12 +199,23 @@ int main(int argc, char *argv[])
   // ------------------------------ Prints
   printf("Biggest Number:%u\n", biggest);
   printf("Smallest Number:%u\n", smallest);
-  printf("Histogram Value Range Width:%u\n", histogram_size);
+  printf("Histogram Value Range Width:%u\n", histogram_factor);
   // ------------------------------ Prints
 
   cudaEventRecord(start);
   for (uint r = 0; r < n_repetitions; r++)
   {
+    cudaMalloc(&d_input, input_size);
+    cudaMalloc(&d_output, input_size);
+    cudaMalloc(&d_global_histogram, histogram_size);
+    cudaMemset(d_global_histogram, 0, histogram_size);
+    cudaMalloc(&d_global_histogram_scan, histogram_size);
+
+    cudaMalloc(&d_line_histogram, blocks_per_grid * histogram_size);
+    cudaMemset(d_line_histogram, 0, blocks_per_grid * histogram_size);
+    cudaMalloc(&d_vertical_scan, blocks_per_grid * histogram_size);
+    cudaMalloc(&d_aux, max_size_aux * sizeof(uint));
+
     cudaMemcpy(d_input, h_input, input_size, cudaMemcpyHostToDevice);
     block_histogram<<<blocks_per_grid, THREADS_PER_BLOCK, histogram_size>>>(d_input, n_elements, d_global_histogram, d_line_histogram, histogram_factor, n_histograms, smallest);
     cudaDeviceSynchronize();
@@ -229,6 +229,7 @@ int main(int argc, char *argv[])
 
     partition_insert<<<blocks_per_grid, THREADS_PER_BLOCK, n_histograms>>>(d_vertical_scan, d_global_histogram_scan, n_histograms, d_input, d_output, n_elements, smallest, histogram_factor);
     cudaMemcpy(h_output, d_output, input_size, cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
 
     for (uint i = 0; i < n_histograms; i++)
     {
@@ -252,6 +253,14 @@ int main(int argc, char *argv[])
       for (uint j = start_index; j < end_index; j++)
         h_output[j] = h_aux[k++];
     }
+
+    cudaFree(d_input);
+    cudaFree(d_output);
+    cudaFree(d_global_histogram);
+    cudaFree(d_global_histogram_scan);
+    cudaFree(d_line_histogram);
+    cudaFree(d_vertical_scan);
+    cudaFree(d_aux);
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
@@ -284,13 +293,6 @@ int main(int argc, char *argv[])
   free(h_output);
   free(h_global_histogram_scan);
   free(h_aux);
-  cudaFree(d_input);
-  cudaFree(d_output);
-  cudaFree(d_global_histogram);
-  cudaFree(d_global_histogram_scan);
-  cudaFree(d_line_histogram);
-  cudaFree(d_vertical_scan);
-  cudaFree(d_aux);
 
   return 0;
 }
