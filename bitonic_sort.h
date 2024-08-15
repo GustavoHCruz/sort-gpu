@@ -240,7 +240,7 @@ extern "C" uint bitonicSort(uint *d_DstKey, uint *d_DstVal, uint *d_SrcKey,
 
   if (arrayLength <= SHARED_SIZE_LIMIT)
   {
-    // assert((batchSize * arrayLength) % SHARED_SIZE_LIMIT == 0);
+    assert((batchSize * arrayLength) % SHARED_SIZE_LIMIT == 0);
     bitonicSortShared<<<blockCount, threadCount>>>(d_DstKey, d_DstVal, d_SrcKey,
                                                    d_SrcVal, arrayLength, dir);
   }

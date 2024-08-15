@@ -178,8 +178,15 @@ int main(int argc, char *argv[])
 
   uint histogram_size = n_histograms * sizeof(uint);
 
-  float input_size = n_elements * sizeof(uint);
-  uint *d_input, *h_input = (uint *)malloc(input_size), *d_output, *h_output = (uint *)malloc(input_size), smallest, biggest, *d_global_histogram, *d_line_histogram, *d_global_histogram_scan, *h_global_histogram_scan = (uint *)malloc(histogram_size), *d_vertical_scan, *h_aux = (uint *)malloc(SHARED_SIZE_LIMIT * sizeof(uint)), *d_aux;
+  uint input_size = n_elements * sizeof(uint);
+
+  uint potency = 2;
+  while (potency < n_elements)
+    potency *= 2;
+
+  uint max_size_aux = max(potency, 1024U);
+
+  uint *d_input, *h_input = (uint *)malloc(input_size), *d_output, *h_output = (uint *)malloc(input_size), smallest, biggest, *d_global_histogram, *d_line_histogram, *d_global_histogram_scan, *h_global_histogram_scan = (uint *)malloc(histogram_size), *d_vertical_scan, *h_aux = (uint *)malloc(max_size_aux * sizeof(uint)), *d_aux;
   cudaMalloc(&d_input, input_size);
   cudaMalloc(&d_output, input_size);
 
@@ -192,7 +199,7 @@ int main(int argc, char *argv[])
   cudaMalloc(&d_line_histogram, blocks_per_grid * histogram_size);
   cudaMemset(d_line_histogram, 0, blocks_per_grid * histogram_size);
   cudaMalloc(&d_vertical_scan, blocks_per_grid * histogram_size);
-  cudaMalloc(&d_aux, SHARED_SIZE_LIMIT * sizeof(uint));
+  cudaMalloc(&d_aux, max_size_aux * sizeof(uint));
 
   initialize_input_vector(h_input, n_elements, &smallest, &biggest);
 
@@ -207,7 +214,7 @@ int main(int argc, char *argv[])
   // ------------------------------ Prints
 
   cudaEventRecord(start);
-  for (size_t i = 0; i < n_repetitions; i++)
+  for (uint r = 0; r < n_repetitions; r++)
   {
     cudaMemcpy(d_input, h_input, input_size, cudaMemcpyHostToDevice);
     block_histogram<<<blocks_per_grid, THREADS_PER_BLOCK, histogram_size>>>(d_input, n_elements, d_global_histogram, d_line_histogram, histogram_factor, n_histograms, smallest);
@@ -234,12 +241,12 @@ int main(int argc, char *argv[])
       for (uint j = start_index; j < end_index; j++)
         h_aux[k++] = h_output[j];
 
-      for (uint j = end_index - start_index; j < SHARED_SIZE_LIMIT; j++)
+      for (uint j = end_index - start_index; j < max_size_aux; j++)
         h_aux[j] = MAX_RAND + 1;
 
-      cudaMemcpy(d_aux, h_aux, SHARED_SIZE_LIMIT * sizeof(uint), cudaMemcpyHostToDevice);
-      bitonicSort(d_aux, d_aux, d_aux, d_aux, 1, SHARED_SIZE_LIMIT, 1);
-      cudaMemcpy(h_aux, d_aux, SHARED_SIZE_LIMIT * sizeof(uint), cudaMemcpyDeviceToHost);
+      cudaMemcpy(d_aux, h_aux, max_size_aux * sizeof(uint), cudaMemcpyHostToDevice);
+      bitonicSort(d_aux, d_aux, d_aux, d_aux, 1, max_size_aux, 1);
+      cudaMemcpy(h_aux, d_aux, max_size_aux * sizeof(uint), cudaMemcpyDeviceToHost);
 
       k = 0;
       for (uint j = start_index; j < end_index; j++)
@@ -253,8 +260,13 @@ int main(int argc, char *argv[])
   cudaEventElapsedTime(&simple_sort_milliseconds, start, stop);
 
   cudaEventRecord(start);
-  thrust::device_vector<uint> d_vec(h_input, h_input + n_elements);
-  thrust::sort(d_vec.begin(), d_vec.end());
+
+  for (uint r = 0; r < n_repetitions; r++)
+  {
+    thrust::device_vector<uint> d_vec(h_input, h_input + n_elements);
+    thrust::sort(d_vec.begin(), d_vec.end());
+  }
+
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
 
@@ -263,10 +275,10 @@ int main(int argc, char *argv[])
 
   double ops = static_cast<double>(n_elements) / ((simple_sort_milliseconds / n_repetitions) / 1000);
 
-  printf("Simple Sort Time: %.2lfms\n", simple_sort_milliseconds);
+  printf("Simple Sort Time: %.2lfms\n", (simple_sort_milliseconds / n_repetitions));
   printf("Throughput: %.2lf\n", ops);
 
-  printf("Thrust Sort Time: %.2lfms\n", thrust_milliseconds);
+  printf("Thrust Sort Time: %.2lfms\n", (thrust_milliseconds / n_repetitions));
 
   free(h_input);
   free(h_output);
