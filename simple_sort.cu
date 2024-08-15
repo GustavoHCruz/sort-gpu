@@ -7,40 +7,6 @@
 #define MAX_RAND 100
 #define POTENCY 1024
 
-/* __global__ void partition_sort(uint *global_scan, uint *output, uint n_histograms, uint n_elements)
-{
-  extern __shared__ uint array_to_sort[];
-
-  uint thread_id = threadIdx.x;
-  uint block_id = blockIdx.x;
-
-  uint start_index = global_scan[block_id];
-  uint end_index = n_elements - 1;
-  if (block_id + 1 < n_histograms)
-    end_index = global_scan[block_id + 1];
-
-  if (thread_id < end_index - start_index)
-    array_to_sort[thread_id] = output[start_index + thread_id];
-  else
-    array_to_sort[thread_id] = MAX_RAND + 1;
-
-  __syncthreads();
-
-  // if (thread_id == 0)
-  //   bitonicSortKernel(array_to_sort, blockDim.x);
-
-  __syncthreads();
-
-  if (thread_id == 0)
-  {
-    for (int i = 0; i < 10; i++)
-      output[i] = array_to_sort[i];
-  }
-
-  if (thread_id < end_index - start_index)
-    output[start_index + thread_id] = array_to_sort[thread_id];
-} */
-
 __global__ void partition_insert(uint *vertical_scan, uint *global_scan, uint n_histograms, uint *input, uint *output, uint n_elements, uint smallest, uint histogram_factor)
 {
   extern __shared__ uint hist_counter[];
@@ -299,15 +265,13 @@ int main(int argc, char *argv[])
       }
 
       cudaMemcpy(d_aux, h_aux, POTENCY * sizeof(uint), cudaMemcpyHostToDevice);
-      bitonicSort(d_aux, d_aux, d_aux, d_aux, 1, POTENCY, 0);
+      bitonicSort(d_aux, d_aux, d_aux, d_aux, 1, POTENCY, 1);
       cudaMemcpy(h_aux, d_aux, POTENCY * sizeof(uint), cudaMemcpyDeviceToHost);
 
       k = 0;
-      for (uint j = start_index; j < end_index - start_index; j++)
+      for (uint j = start_index; j < end_index; j++)
         h_output[j] = h_aux[k++];
     }
-
-    /* partition_sort<<<n_histograms, THREADS_PER_BLOCK, THREADS_PER_BLOCK * sizeof(uint)>>>(d_global_histogram_scan, d_output, n_histograms, n_elements); */
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
