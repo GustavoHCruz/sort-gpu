@@ -15,15 +15,15 @@ __global__ void partition_insert(uint *vertical_scan, uint *global_scan, uint n_
   uint thread_id = threadIdx.x;
   uint block_id = blockIdx.x;
 
-  uint curr_line_offset_mult = block_id * n_histograms;
+  uint curr_line_index_mult = block_id * n_histograms;
   uint curr_input_offset_mult = block_id * blockDim.x;
 
   if (thread_id < n_histograms)
-    hist_counter[thread_id] = vertical_scan[thread_id + curr_line_offset_mult] + global_scan[thread_id];
+    hist_counter[thread_id] = vertical_scan[thread_id + curr_line_index_mult] + global_scan[thread_id];
 
   __syncthreads();
 
-  if (thread_id < n_elements)
+  if (thread_id + curr_input_offset_mult < n_elements)
   {
     uint input_value = input[thread_id + curr_input_offset_mult];
     uint interval_to_insert = min((input_value - smallest) / histogram_factor, n_histograms - 1);
@@ -37,25 +37,24 @@ __global__ void partition_insert(uint *vertical_scan, uint *global_scan, uint n_
 
 __global__ void vertical_scan(uint *line_histogram, uint *vertical_scan, uint n_histograms, uint line_amount)
 {
-  extern __shared__ uint scan[];
-
   uint thread_id = threadIdx.x;
   uint col = blockIdx.x;
   uint line = n_histograms;
 
   if (thread_id == 0)
-    scan[col + (line * thread_id)] = 0;
+    vertical_scan[col] = 0;
+  __syncthreads();
 
   if (thread_id < line_amount)
   {
-    scan[col + (line * (thread_id + 1))] = line_histogram[col + (line * thread_id)];
+    vertical_scan[col + (line * (thread_id + 1))] = line_histogram[col + (line * thread_id)];
     __syncthreads();
 
     for (uint stride = 1; stride < line_amount; stride *= 2)
     {
       uint index = (thread_id + 1) * stride * 2 - 1;
       if (index < line_amount)
-        scan[col + (line * index)] += scan[col + (line * (index - stride))];
+        vertical_scan[col + (line * index)] += vertical_scan[col + (line * (index - stride))];
 
       __syncthreads();
     }
@@ -65,12 +64,11 @@ __global__ void vertical_scan(uint *line_histogram, uint *vertical_scan, uint n_
       __syncthreads();
       uint index = (thread_id + 1) * stride * 2 - 1;
       if (index + stride < line_amount)
-        scan[col + (line * (index + stride))] += scan[col + (line * index)];
+        vertical_scan[col + (line * (index + stride))] += vertical_scan[col + (line * index)];
     }
     __syncthreads();
 
-    vertical_scan[col + (line * thread_id)] = scan[col + (line * thread_id)];
-    __syncthreads();
+    vertical_scan[col + (line * thread_id)] = vertical_scan[col + (line * thread_id)];
   }
 }
 
@@ -140,12 +138,22 @@ __global__ void block_histogram(uint *input, uint n_elements, uint *global_histo
     memcpy(line_histogram + (block_id * n_histograms), local_histogram, n_histograms * sizeof(uint));
 }
 
-void initialize_input_vector(uint *input, unsigned short n_elements, uint *smallest, uint *biggest)
+bool verify_sort(uint *a, uint *b, uint size)
+{
+  bool flag = true;
+  for (int i = 0; i < size; i++)
+    if (a[i] != b[i])
+      flag = false;
+
+  return flag;
+}
+
+void initialize_input_vector(uint *input, uint n_elements, uint *smallest, uint *biggest)
 {
   *smallest = std::numeric_limits<uint>::max();
   *biggest = std::numeric_limits<uint>::min();
 
-  for (unsigned short i = 0; i < n_elements; i++)
+  for (uint i = 0; i < n_elements; i++)
   {
     int a = rand() % (MAX_RAND + 1);
     uint v = static_cast<uint>(a);
@@ -168,6 +176,8 @@ int main(int argc, char *argv[])
     return -1;
   }
 
+  std::srand(0);
+
   uint n_elements = std::atoi(argv[1]);
   uint n_histograms = std::atoi(argv[2]);
   uint n_repetitions = std::atoi(argv[3]);
@@ -186,7 +196,7 @@ int main(int argc, char *argv[])
 
   uint max_size_aux = max(potency, 1024U);
 
-  uint *d_input, *h_input = (uint *)malloc(input_size), *d_output, *h_output = (uint *)malloc(input_size), smallest, biggest, *d_global_histogram, *d_line_histogram, *d_global_histogram_scan, *h_global_histogram_scan = (uint *)malloc(histogram_size), *d_vertical_scan, *h_aux = (uint *)malloc(max_size_aux * sizeof(uint)), *d_aux;
+  uint *d_input, *h_input = (uint *)malloc(input_size), *d_output, *h_output = (uint *)malloc(input_size), *thrust_output = (uint *)malloc(input_size), smallest, biggest, *d_global_histogram, *d_line_histogram, *d_global_histogram_scan, *h_global_histogram_scan = (uint *)malloc(histogram_size), *d_vertical_scan, *h_aux = (uint *)malloc(max_size_aux * sizeof(uint)), *d_aux;
 
   uint blocks_per_grid = (n_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
@@ -224,7 +234,7 @@ int main(int argc, char *argv[])
     cudaMemcpy(h_global_histogram_scan, d_global_histogram_scan, histogram_size, cudaMemcpyDeviceToHost);
     cudaDeviceSynchronize();
 
-    vertical_scan<<<n_histograms, THREADS_PER_BLOCK, blocks_per_grid * histogram_size>>>(d_line_histogram, d_vertical_scan, n_histograms, blocks_per_grid);
+    vertical_scan<<<n_histograms, THREADS_PER_BLOCK>>>(d_line_histogram, d_vertical_scan, n_histograms, blocks_per_grid);
     cudaDeviceSynchronize();
 
     partition_insert<<<blocks_per_grid, THREADS_PER_BLOCK, n_histograms>>>(d_vertical_scan, d_global_histogram_scan, n_histograms, d_input, d_output, n_elements, smallest, histogram_factor);
@@ -247,6 +257,7 @@ int main(int argc, char *argv[])
 
       cudaMemcpy(d_aux, h_aux, max_size_aux * sizeof(uint), cudaMemcpyHostToDevice);
       bitonicSort(d_aux, d_aux, d_aux, d_aux, 1, max_size_aux, 1);
+      cudaDeviceSynchronize();
       cudaMemcpy(h_aux, d_aux, max_size_aux * sizeof(uint), cudaMemcpyDeviceToHost);
 
       k = 0;
@@ -269,15 +280,21 @@ int main(int argc, char *argv[])
   cudaEventElapsedTime(&simple_sort_milliseconds, start, stop);
 
   cudaEventRecord(start);
-
   for (uint r = 0; r < n_repetitions; r++)
   {
     thrust::device_vector<uint> d_vec(h_input, h_input + n_elements);
     thrust::sort(d_vec.begin(), d_vec.end());
+    thrust::copy(d_vec.begin(), d_vec.end(), thrust_output);
   }
-
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
+
+  bool sort_validation = verify_sort(h_output, thrust_output, n_elements);
+
+  if (sort_validation)
+    printf("The Sort Is Valid\n");
+  else
+    printf("The Sort Is Invalid\n");
 
   float thrust_milliseconds = 0;
   cudaEventElapsedTime(&thrust_milliseconds, start, stop);
@@ -291,6 +308,7 @@ int main(int argc, char *argv[])
 
   free(h_input);
   free(h_output);
+  free(thrust_output);
   free(h_global_histogram_scan);
   free(h_aux);
 
