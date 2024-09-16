@@ -18,53 +18,56 @@ __global__ void blockAndGlobalHisto(uint *input, uint n_elements, uint *global_h
   uint tid = threadIdx.x;
   uint bid = blockIdx.x;
   uint idx = tid + bid * blockDim.x;
+  uint histogram_position;
 
-  if (tid == 0)
-    for (uint i = 0; i < n_histograms; i++)
-      local_histogram[i] = 0;
+  for (uint i = tid; i < n_histograms; i += blockDim.x)
+    local_histogram[i] = 0;
 
   __syncthreads();
 
   if (idx < n_elements)
   {
-    uint histogram_position = min((input[idx] - smallest) / histogram_factor, n_histograms - 1);
-
-    atomicAdd(&global_histogram[histogram_position], 1);
+    histogram_position = min((input[idx] - smallest) / histogram_factor, n_histograms - 1);
     atomicAdd(&local_histogram[histogram_position], 1);
   }
 
   __syncthreads();
 
-  if (tid == 0)
-    memcpy(line_histogram + (bid * n_histograms), local_histogram, n_histograms * sizeof(uint));
+  for (uint i = tid; i < n_histograms; i += blockDim.x)
+  {
+    line_histogram[i + bid * n_histograms] = local_histogram[i];
+    atomicAdd(&global_histogram[i], local_histogram[i]);
+  }
 }
 
 __global__ void globalHistoScan(uint *global_histogram, uint *global_histogram_scan, uint n_histograms)
 {
-  extern __shared__ uint scan[];
-
   uint tid = threadIdx.x;
 
   if (tid == 0)
+  {
+    uint sum = 0;
     for (uint i = 0; i < n_histograms; i++)
-      if (i == 0)
-        global_histogram_scan[i] = 0;
-      else
-        global_histogram_scan[i] = global_histogram_scan[i - 1] + global_histogram[i - 1];
+    {
+      global_histogram_scan[i] = sum;
+      sum += global_histogram[i];
+    }
+  }
 }
 
 __global__ void verticalScanHH(uint *line_histogram, uint *vertical_scan, uint n_histograms, uint blocks_per_grid)
 {
   uint tid = threadIdx.x;
   uint bid = blockIdx.x;
+  uint idx = tid + blockDim.x * bid;
 
   uint sum = 0;
 
   if (tid + bid * blockDim.x < n_histograms)
     for (uint i = 0; i < blocks_per_grid; i++)
     {
-      vertical_scan[tid + (blockDim.x * bid) + (i * n_histograms)] = sum;
-      sum += line_histogram[tid + (blockDim.x * bid) + (i * n_histograms)];
+      vertical_scan[idx + (i * n_histograms)] = sum;
+      sum += line_histogram[idx + (i * n_histograms)];
     }
 }
 
@@ -127,8 +130,6 @@ __global__ void blockBitonicSort(uint *global_histogram_scan, uint *output, uint
     aux[tid] = UINT_MAX;
 
   __syncthreads();
-
-  assert(end_index - start_index < SHARED_SIZE_LIMIT);
 
   uint dir = 1;
 
@@ -201,11 +202,14 @@ int main(int argc, char *argv[])
     return -1;
   }
 
-  std::srand(0);
-
   uint n_elements = std::atoi(argv[1]);
   uint n_histograms = std::atoi(argv[2]);
   uint n_repetitions = std::atoi(argv[3]);
+
+  printf("============== Starting Execution ==============\n");
+
+  if (n_elements / n_histograms > THREADS_PER_BLOCK - 150)
+    printf("WARNING: the number of elements is too high for the histograms to be divided, this may result in bitonic sorting having to deal with more elements than a block of threads (%i) can support, which may lead to an incorrect sorting result\n", THREADS_PER_BLOCK);
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
@@ -226,6 +230,13 @@ int main(int argc, char *argv[])
 
   uint blocks_per_grid = (n_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
   uint histograms_per_grid = (n_histograms + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+  int limit_shared_memory;
+  cudaDeviceGetAttribute(&limit_shared_memory, cudaDevAttrMaxSharedMemoryPerBlock, 0);
+
+  unsigned long int memory_usage = n_histograms * sizeof(uint);
+  if (memory_usage > limit_shared_memory)
+    printf("WARNING: The number of histogram divisions is too high, this will result in excessive shared memory usage (%lu used out of %i available) which will lead to incorrect sorting result\n", memory_usage, limit_shared_memory);
 
   initialize_input_vector(h_input, n_elements, &smallest, &biggest);
 
@@ -249,6 +260,15 @@ int main(int argc, char *argv[])
 
   for (uint r = 0; r < n_repetitions; r++)
   {
+    // ================= warm-up
+    cudaMemset(d_line_histogram, 0, blocks_per_grid * histogram_size);
+    cudaMemset(d_global_histogram, 0, histogram_size);
+
+    cudaMemcpy(d_input, h_input, input_size, cudaMemcpyHostToDevice);
+
+    blockAndGlobalHisto<<<blocks_per_grid, THREADS_PER_BLOCK, histogram_size>>>(d_input, n_elements, d_global_histogram, d_line_histogram, histogram_factor, n_histograms, smallest);
+    // =================
+
     cudaMemset(d_line_histogram, 0, blocks_per_grid * histogram_size);
     cudaMemset(d_global_histogram, 0, histogram_size);
 
@@ -258,7 +278,7 @@ int main(int argc, char *argv[])
 
     blockAndGlobalHisto<<<blocks_per_grid, THREADS_PER_BLOCK, histogram_size>>>(d_input, n_elements, d_global_histogram, d_line_histogram, histogram_factor, n_histograms, smallest);
 
-    globalHistoScan<<<1, THREADS_PER_BLOCK, histogram_size>>>(d_global_histogram, d_global_histogram_scan, n_histograms);
+    globalHistoScan<<<1, THREADS_PER_BLOCK>>>(d_global_histogram, d_global_histogram_scan, n_histograms);
 
     verticalScanHH<<<histograms_per_grid, THREADS_PER_BLOCK>>>(d_line_histogram, d_vertical_scan, n_histograms, blocks_per_grid);
 
@@ -309,18 +329,26 @@ int main(int argc, char *argv[])
   else
     printf("The Sort Is Invalid\n");
 
-  double ops = static_cast<double>(n_elements) / ((simple_sort_milliseconds / n_repetitions) / 1000);
+  double flops = static_cast<double>(n_elements) / ((simple_sort_milliseconds / n_repetitions) / 1000);
+
+  double mflops = flops / 1e6;
 
   printf("Simple Sort Time: %.2lfms\n", (simple_sort_milliseconds / n_repetitions));
-  printf("Throughput: %.2lf\n", ops);
+  printf("Throughput: %.2lf MFLOPS\n", mflops);
 
   printf("Thrust Sort Time: %.2lfms\n", (thrust_milliseconds / n_repetitions));
+
+  double accleration = thrust_milliseconds / simple_sort_milliseconds;
+
+  printf("Acceleration: %.2lf\n", accleration);
 
   free(h_input);
   free(h_output);
   free(thrust_output);
   free(h_global_histogram_scan);
   free(h_aux);
+
+  printf("\n\n");
 
   return 0;
 }
