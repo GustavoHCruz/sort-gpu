@@ -2,7 +2,7 @@ TARGET = simple_sort
 
 NVCC = nvcc
 
-NVCCFLAGS = -I /usr/include/c++/10 -I /usr/lib/cuda/include/
+NVCCFLAGS = --std=c++11 -I /usr/include/c++/10 -I /usr/lib/cuda/include/
 
 CUFILES = simple_sort.cu
 
