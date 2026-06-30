@@ -1,4 +1,4 @@
-# Sort On Cuda
+# Sort on Cuda
 
 This projects is a implementation of an Sort on NVIDIA GPU's, using CUDA, Thrust and C++.
 
